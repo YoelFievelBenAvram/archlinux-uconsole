@@ -1,0 +1,235 @@
+# uConsole kernel for CM3/4
+# Maintainer: YoelFievelBenAvram
+# Adapted from PotatoMania"s PKGBUILD"
+
+pkgbase=linux-uconsole-rpi64
+pkgver=6.12.22+g2711419965f6
+# _majorversion=${pkgver%.*}
+# _subversion=${pkgver##*.}
+# _srcname=linux-${_majorversion}
+_desc="Rex's kernel for Arch Arm"
+
+_srcname=linux
+_srcbranch="rpi-6.12.y"
+_repourl="git+https://github.com/ak-rex/ClockworkPi-linux.git#branch=${_srcbranch}"
+
+pkgrel=1
+arch=('aarch64')
+url="https://github.com/ak-rex/ClockworkPi-linux"
+license=('GPL2')
+makedepends=(
+  bc
+  cpio
+  gettext
+  git
+  libelf
+  pahole
+  perl
+  python
+  tar
+  xz
+)
+options=(
+  !debug
+  !strip
+)
+source=("${_srcname}::${_repourl}"
+        'config'
+        '90-linux-dtbs.hook'
+        )
+b2sums=('SKIP'
+        '476f7d94e6f77d6e9e501482daa6fad470e13c9b154c63bceb5090768bf34f1413ea82b280b26510f83d91431c480c894f2c910cfe0c2105cc1d75d1466343ff'
+        'bf23fa8846d66d358d5bc4f25719dc5adea4cd43837e1c9eb0ff292c03c83951bf02363e8bbf96bbee3fa618d9b8b92a6ff27c65319186ff08677f1d4d74c128'
+        )
+
+
+
+export KBUILD_BUILD_HOST=archlinux
+export KBUILD_BUILD_USER=$pkgbase
+export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+
+prepare() {
+  cd ${_srcname}
+
+  # add upstream patch, this is for upstream kernels
+  #patch -Np1 < ${srcdir}/patch-${pkgver}
+
+  echo "Setting version..."
+  echo "-$pkgrel" > localversion.10-pkgrel
+  echo "${pkgbase#linux}" > localversion.20-pkgname
+  make -s defconfig
+  make -s kernelrelease > version
+  make -s mrproper
+
+
+  echo "Setting config..."
+  cp ${srcdir}/config .config
+  make KERNELRELEASE="$(<version)" olddefconfig
+  diff -u ${srcdir}/config .config || :
+
+  echo "Prepared $pkgbase version $(<version)"
+}
+
+pkgver() {
+	cd "${srcdir}/${_srcname}"	
+	eval $(grep -o "^\(VERSION\|PATCHLEVEL\|SUBLEVEL\) = [0-9a-zA-Z_-]\+" Makefile | tr -d \ )
+	printf "%s.%s.%s+g%s" $VERSION $PATCHLEVEL $SUBLEVEL "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd ${_srcname}
+  make KERNELRELEASE="$(<version)" all
+}
+
+_package() {
+  pkgdesc="The Linux Kernel and modules - ${_desc}"
+  depends=(
+    coreutils
+    initramfs
+    kmod
+  )
+  optdepends=(
+    'wireless-regdb: to set the correct wireless channels of your country'
+    'linux-firmware: firmware images needed for some devices'
+    'firmware-raspberrypi: firmware images needed for on-board wireless module'
+    'brcmfmac43456-firmware: firmware for on board WiFi'
+    'ap6256-firmware: WiFi&BT firmware, replaces brcmfmac43456-firmware and firmware-raspberrypi on uConsole'
+    'raspberrypi-bootloader: bootloader for RPis'
+  )
+  provides=(
+    "WIREGUARD-MODULE"
+  )
+  install=${pkgname}.install
+
+  cd $_srcname
+  local kernver="$(<version)"
+  local modulesdir="$pkgdir/usr/lib/modules/$kernver"
+
+  echo "Installing boot image..."
+  # systemd expects to find the kernel here to allow hibernation
+  # https://github.com/systemd/systemd/commit/edda44605f06a41fb86b7ab8128dcf99161d2344
+  install -Dm644 "$(make -s image_name)" "$modulesdir/vmlinuz"
+
+  # Used by mkinitcpio to name the kernel
+  echo "$pkgbase" | install -Dm644 /dev/stdin "$modulesdir/pkgbase"
+
+  echo "Installing modules..."
+  make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 \
+    DEPMOD=/doesnt/exist modules_install  # Suppress depmod
+
+  echo "Installing dtbs..."
+  make INSTALL_DTBS_PATH="$modulesdir/dtb" dtbs_install
+
+  # remove build link
+  rm "$modulesdir"/build
+
+  # sed expression for following substitutions
+  local _subst="
+    s|%PKGBASE%|${pkgbase}|g
+    s|%KERNVER%|${kernver}|g
+  "
+
+  # install extra pacman hooks
+  sed "${_subst}" ../90-linux-dtbs.hook |
+    install -Dm644 /dev/stdin "${pkgdir}/usr/share/libalpm/hooks/90-${pkgbase}-dtbs.hook"
+}
+
+_package-headers() {
+  pkgdesc="Header files and scripts for building modules for linux kernel - ${_desc}"
+  depends=(pahole)
+
+  cd $_srcname
+  local builddir="$pkgdir/usr/lib/modules/$(<version)/build"
+
+  echo "Installing build files..."
+  install -Dt "$builddir" -m644 .config Makefile Module.symvers System.map \
+    localversion.* version vmlinux
+  install -Dt "$builddir/kernel" -m644 kernel/Makefile
+  install -Dt "$builddir/arch/arm64" -m644 arch/arm64/Makefile
+  cp -t "$builddir" -a scripts
+
+  # required when STACK_VALIDATION is enabled
+  # install -Dt "$builddir/tools/objtool" tools/objtool/objtool
+
+  # required when DEBUG_INFO_BTF_MODULES is enabled
+  # install -Dt "$builddir/tools/bpf/resolve_btfids" tools/bpf/resolve_btfids/resolve_btfids
+
+  echo "Installing headers..."
+  cp -t "$builddir" -a include
+  cp -t "$builddir/arch/arm64" -a arch/arm64/include
+  install -Dt "$builddir/arch/arm64/kernel" -m644 arch/arm64/kernel/asm-offsets.s
+  mkdir -p "$builddir/arch/arm"
+  cp -t "$builddir/arch/arm" -a arch/arm/include
+
+  install -Dt "$builddir/drivers/md" -m644 drivers/md/*.h
+  install -Dt "$builddir/net/mac80211" -m644 net/mac80211/*.h
+
+  # https://bugs.archlinux.org/task/13146
+  install -Dt "$builddir/drivers/media/i2c" -m644 drivers/media/i2c/msp3400-driver.h
+
+  # https://bugs.archlinux.org/task/20402
+  install -Dt "$builddir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
+  install -Dt "$builddir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
+  install -Dt "$builddir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
+
+  # https://bugs.archlinux.org/task/71392
+  install -Dt "$builddir/drivers/iio/common/hid-sensors" -m644 drivers/iio/common/hid-sensors/*.h
+
+  echo "Installing KConfig files..."
+  find . -name 'Kconfig*' -exec install -Dm644 {} "$builddir/{}" \;
+
+  echo "Removing unneeded architectures..."
+  local arch
+  for arch in "$builddir"/arch/*/; do
+    [[ $arch = */arm64/ || $arch == */arm/ ]] && continue
+    echo "Removing $(basename "$arch")"
+    rm -r "$arch"
+  done
+
+  echo "Removing documentation..."
+  rm -r "$builddir/Documentation"
+
+  echo "Removing broken symlinks..."
+  find -L "$builddir" -type l -printf 'Removing %P\n' -delete
+
+  echo "Removing loose objects..."
+  find "$builddir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+
+  echo "Stripping build tools..."
+  local file
+  while read -rd '' file; do
+    case "$(file -Sib "$file")" in
+      application/x-sharedlib\;*)      # Libraries (.so)
+        strip -v $STRIP_SHARED "$file" ;;
+      application/x-archive\;*)        # Libraries (.a)
+        strip -v $STRIP_STATIC "$file" ;;
+      application/x-executable\;*)     # Binaries
+        strip -v $STRIP_BINARIES "$file" ;;
+      application/x-pie-executable\;*) # Relocatable binaries
+        strip -v $STRIP_SHARED "$file" ;;
+    esac
+  done < <(find "$builddir" -type f -perm -u+x ! -name vmlinux -print0)
+
+  echo "Stripping vmlinux..."
+  strip -v $STRIP_STATIC "$builddir/vmlinux"
+
+  echo "Adding symlink..."
+  mkdir -p "$pkgdir/usr/src"
+  ln -sr "$builddir" "$pkgdir/usr/src/$pkgbase"
+}
+
+
+pkgname=("${pkgbase}")
+if uname -m | grep "aarch64"
+then
+  pkgname+=("${pkgbase}-headers")
+fi
+
+
+for _p in "${pkgname[@]}"; do
+  eval "package_${_p}() {
+    $(declare -f "_package${_p#$pkgbase}")
+    _package${_p#${pkgbase}}
+  }"
+done
